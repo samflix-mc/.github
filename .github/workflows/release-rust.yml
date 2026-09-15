@@ -1,0 +1,108 @@
+name: Binaires Rust (réutilisable)
+
+# Compile un binaire Rust pour Windows, macOS et Linux, et publie une release
+# GitHub. Appelé sur tag :
+#
+#   on:
+#     push:
+#       tags: ["v*"]
+#   jobs:
+#     release:
+#       uses: samflix-mc/.github/.github/workflows/release-rust.yml@main
+#       with:
+#         binary: mc-auth
+#
+# Les runners GitHub sont gratuits et illimités sur les dépôts publics, macOS
+# compris — c'est ce qui rend cette matrice indolore. Sur un dépôt privé elle
+# consommerait le quota mensuel, macOS comptant dix fois.
+
+on:
+  workflow_call:
+    inputs:
+      binary:
+        description: Nom du binaire produit par cargo
+        type: string
+        required: true
+      prerelease:
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,     target: x86_64-unknown-linux-gnu,  ext: "" }
+          - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, ext: "" }
+          - { os: macos-latest,      target: aarch64-apple-darwin,      ext: "" }
+          - { os: macos-latest,      target: x86_64-apple-darwin,       ext: "" }
+          - { os: windows-latest,    target: x86_64-pc-windows-msvc,    ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Chaîne Rust
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compiler
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Empaqueter
+        shell: bash
+        run: |
+          name="${{ inputs.binary }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${{ inputs.binary }}${{ matrix.ext }}" "dist/$name/"
+          cp README.md "dist/$name/" 2>/dev/null || true
+          cd dist
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            7z a "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          # Empreinte : permet au joueur de vérifier ce qu'il a téléchargé.
+          for f in "$name".zip "$name".tar.gz; do
+            [ -f "$f" ] && sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.binary }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publier la release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          # Les binaires ne sont pas signés : Windows affichera SmartScreen et
+          # macOS refusera le lancement au premier double-clic. La signature
+          # coûte ~99 $/an chez Apple et plusieurs centaines d'euros côté
+          # Windows — à budgéter avant toute distribution publique.
+          body: |
+            ⚠️ Binaires non signés — voir les instructions d'installation.

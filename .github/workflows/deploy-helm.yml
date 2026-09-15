@@ -1,0 +1,115 @@
+name: Déploiement Helm (réutilisable)
+
+# Déploie un chart Helm sur le cluster K3s de samflix, appelé par les autres
+# dépôts de l'organisation :
+#
+#   jobs:
+#     deploy:
+#       uses: samflix-mc/.github/.github/workflows/deploy-helm.yml@main
+#       with:
+#         chart-path: chart
+#         release: mon-service
+#         namespace: mc-dev
+#         environment: dev
+#       secrets: inherit
+#
+# helm tourne SUR LE SERVEUR : le kubeconfig K3s y pointe sur 127.0.0.1:6443,
+# et le port 6443 est fermé depuis l'extérieur. Le runner ne fait que du SSH.
+
+on:
+  workflow_call:
+    inputs:
+      chart-path:
+        description: Chemin du chart dans le dépôt appelant
+        type: string
+        required: true
+      release:
+        description: Nom de la release Helm
+        type: string
+        required: true
+      namespace:
+        description: Namespace Kubernetes cible
+        type: string
+        required: true
+      environment:
+        description: dev, preprod ou prod — isole le répertoire distant
+        type: string
+        required: true
+      set:
+        description: Surcharges --set, séparées par des virgules
+        type: string
+        default: ""
+      verify-url:
+        description: URL à interroger après déploiement ; vide pour ne rien vérifier
+        type: string
+        default: ""
+      timeout:
+        description: Délai maximal de helm --wait
+        type: string
+        default: 5m
+
+jobs:
+  deploy:
+    name: ${{ inputs.release }} → ${{ inputs.environment }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    # Un seul déploiement à la fois par release et par environnement, et on
+    # n'interrompt pas celui en cours : un helm interrompu laisse la release
+    # dans un état intermédiaire.
+    concurrency:
+      group: deploy-${{ inputs.release }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      REMOTE_DIR: ${{ github.event.repository.name }}-${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Préparer la clé SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Synchroniser le chart
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          SSH_CMD="ssh -i ~/.ssh/id_deploy -p $SSH_PORT -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+          $SSH_CMD "$SSH_USER@$SSH_HOST" "mkdir -p \"$REMOTE_DIR/chart\""
+          rsync -az --delete -e "$SSH_CMD" \
+            "./${{ inputs.chart-path }}/" "$SSH_USER@$SSH_HOST:$REMOTE_DIR/chart/"
+
+      - name: helm upgrade
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SET: ${{ inputs.set }}
+        run: |
+          EXTRA=""
+          [ -n "$SET" ] && EXTRA="--set $SET"
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
+            -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 \
+            "$SSH_USER@$SSH_HOST" \
+            "helm upgrade --install '${{ inputs.release }}' \"\$HOME/$REMOTE_DIR/chart\" \
+               --namespace '${{ inputs.namespace }}' --create-namespace \
+               -f \"\$HOME/$REMOTE_DIR/chart/values.yaml\" $EXTRA \
+               --atomic --wait --timeout '${{ inputs.timeout }}' --cleanup-on-fail"
+
+      - name: Vérifier
+        if: inputs.verify-url != ''
+        run: |
+          # Traefik met quelques secondes à basculer sur le nouveau pod.
+          sleep 10
+          url="${{ inputs.verify-url }}"
+          code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$url")
+          echo "$url → HTTP $code" >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" = "200" ] || { echo "::error::$url a répondu $code"; exit 1; }
