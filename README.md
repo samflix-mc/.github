@@ -4,10 +4,6 @@ Workflows réutilisables et profil de l'organisation.
 
 ## `deploy-helm.yml`
 
-Déploie un chart Helm sur le cluster K3s de samflix. Le runner ne fait que du
-SSH : `helm` s'exécute sur le serveur, dont le kubeconfig K3s pointe sur
-`127.0.0.1:6443` — le port 6443 est volontairement fermé depuis l'extérieur.
-
 ```yaml
 jobs:
   deploy:
@@ -17,17 +13,15 @@ jobs:
       release: mon-service
       namespace: mc-dev
       environment: dev
-      verify-url: https://dev.exemple.ggy.info
+      verify-url: https://exemple.ggy.info
     secrets: inherit
 ```
 
-Chaque couple dépôt / environnement a son propre répertoire distant, donc les
-trois environnements cohabitent sans se marcher dessus.
+`helm` s'exécute sur le serveur, dont le kubeconfig K3s pointe sur
+`127.0.0.1:6443` — le port est fermé depuis l'extérieur. Le runner ne fait que
+du SSH. Chaque couple dépôt / environnement a son répertoire distant.
 
 ## `release-rust.yml`
-
-Compile un binaire Rust pour Windows, macOS (Intel et Apple Silicon) et Linux
-(x86_64 et arm64), puis publie une release avec les empreintes SHA-256.
 
 ```yaml
 on:
@@ -40,9 +34,11 @@ jobs:
       binary: mc-auth
 ```
 
+Windows, macOS Intel et Apple Silicon, Linux x86_64 et arm64, avec empreintes
+SHA-256. Gratuit et illimité parce que le dépôt est public.
+
 ## Secrets
 
-Les cinq secrets SSH sont définis **au niveau de l'organisation**, visibilité
-« tous les dépôts ». Attention : sur le plan gratuit, les secrets
-d'organisation ne sont **pas** accessibles aux dépôts privés — ceux-là doivent
-avoir leur propre copie, posée avec `gh secret set -R`.
+Les cinq secrets SSH sont définis au niveau de l'organisation. Sur le plan
+gratuit ils ne sont **pas** accessibles aux dépôts privés, qui doivent avoir
+leur propre copie (`gh secret set -R`).
