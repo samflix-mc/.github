@@ -93,8 +93,15 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SET: ${{ inputs.set }}
         run: |
+          # Les guillemets simples sont indispensables : la valeur passée à
+          # --set peut contenir une liste au format helm, {a,b}. Sans eux, le
+          # shell DISTANT applique son expansion d'accolades et transforme
+          # l'argument en deux mots, dont le second devient un argument
+          # positionnel — helm répond alors « requires 2 arguments ».
+          # Une accolade à un seul élément n'étant pas expansée, le défaut
+          # passait inaperçu tant qu'un environnement n'avait qu'un hôte.
           EXTRA=""
-          [ -n "$SET" ] && EXTRA="--set $SET"
+          [ -n "$SET" ] && EXTRA="--set '$SET'"
           ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
             -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
             -o ServerAliveInterval=30 \
