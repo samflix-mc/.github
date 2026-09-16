@@ -105,7 +105,7 @@ jobs:
       # désignent le workflow de l'appelant, donc son dépôt et son commit à lui.
       - uses: actions/checkout@v5
         with:
-          repository: ${{ job.workflow_repository }}
+          repository: samflix-mc/.github
           ref: ${{ job.workflow_sha }}
           path: table
 
@@ -179,7 +179,7 @@ jobs:
             v=$(lire "$1")
             case "$v" in
               ""|null)
-                echo "::error::$1 est absent de la table pour l'environnement $ENV" >&2
+                echo "::error::la table ne donne rien pour « $1 », environnement $ENV" >&2
                 exit 1 ;;
             esac
             printf '%s\n' "$v"
@@ -192,7 +192,7 @@ jobs:
           SECRET=$(exige '.communs.pullSecret')
           URL=$(exige '.environnements[strenv(ENV)].site.url')
           PACK=$(exige '.environnements[strenv(ENV)].site.pack')
-          HOTES=$(lire '.environnements[strenv(ENV)].site.hotes | join(",")')
+          HOTES=$(exige '.environnements[strenv(ENV)].site.hotes | join(",")')
           # Ces deux-là sont les seuls à avoir le droit d'être vides : la
           # préproduction n'héberge aucun serveur Minecraft, et c'est ainsi
           # que la table le dit.
