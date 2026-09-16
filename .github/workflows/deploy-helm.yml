@@ -54,6 +54,12 @@ on:
           vide si le chart ne tire aucune image privée.
         type: string
         default: ""
+      artefact-chart:
+        description: >
+          Nom d'un artefact contenant un chart construit, déposé par-dessus
+          celui du checkout ; vide si le chart est entièrement versionné.
+        type: string
+        default: ""
 
 jobs:
   deploy:
@@ -70,6 +76,20 @@ jobs:
       REMOTE_DIR: ${{ github.event.repository.name }}-${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v5
+
+      # Un chart peut avoir des fichiers construits — une page compilée, par
+      # exemple. Ce job refait son propre checkout : ce qu'un job précédent a
+      # produit n'y est pas, et serait silencieusement remplacé par la version
+      # versionnée, ou par rien du tout.
+      #
+      # L'artefact est déposé par-dessus le checkout, pas à la place : le chart
+      # reste versionné, seuls ses fichiers générés viennent d'ailleurs.
+      - name: Récupérer le chart construit
+        if: inputs.artefact-chart != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artefact-chart }}
+          path: ${{ inputs.chart-path }}
 
       - uses: samflix-mc/.github/.github/actions/ssh-k3s@main
         id: ssh
