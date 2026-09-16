@@ -155,6 +155,21 @@ jobs:
               kubectl -n "$source" get secret "$SECRET" >/dev/null 2>&1 || continue
               kubectl -n "$source" get secret "$SECRET" \
                 -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > "$COPIE"
+
+              # Exister ne suffit pas : un Secret peut porter ce nom sans porter
+              # la clé attendue. Le jsonpath rend alors une chaîne vide, le tube
+              # n'en dit rien, et on recopierait un Secret bien présent mais
+              # creux — que le contrôle de présence, plus bas, déclarerait bon.
+              # Le pod échouerait quand même à tirer l'image, et cette étape
+              # jurerait avoir fait son travail.
+              #
+              # On passe au namespace suivant plutôt que d'échouer : un voisin
+              # peut très bien en porter un valide.
+              if ! jq -e '.auths | length > 0' "$COPIE" >/dev/null 2>&1; then
+                echo "$source porte $SECRET, mais sans identifiants exploitables"
+                continue
+              fi
+
               kubectl -n "$NS" create secret generic "$SECRET" \
                 --type=kubernetes.io/dockerconfigjson \
                 --from-file=.dockerconfigjson="$COPIE" \
