@@ -26,6 +26,17 @@ on:
       prerelease:
         type: boolean
         default: false
+      environnement:
+        description: >
+          Valeur de SAMFLIX_ENV figée dans le binaire — « production » sur les
+          binaires publiés. Elle doit passer par ici, explicitement : un
+          « env: » posé au niveau du workflow APPELANT n'atteint pas un
+          workflow réutilisable, seuls les inputs et les secrets franchissent
+          le « uses: ». Rien ne le signale, et c'est bien le problème — la
+          compilation réussit, la release part, et le binaire se croit
+          « local » chez le joueur.
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -55,6 +66,8 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Compiler
+        env:
+          SAMFLIX_ENV: ${{ inputs.environnement }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Empaqueter
