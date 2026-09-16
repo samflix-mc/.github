@@ -165,7 +165,12 @@ jobs:
               #
               # On passe au namespace suivant plutôt que d'échouer : un voisin
               # peut très bien en porter un valide.
-              if ! jq -e '.auths | length > 0' "$COPIE" >/dev/null 2>&1; then
+              # Test textuel plutôt que jq : ce workflow est partagé par tous
+              # les charts de l'organisation, et lui imposer un outil de plus
+              # sur le nœud pour une vérification de cette taille serait mal
+              # échanger. Le motif cherche une entrée réelle sous « auths » —
+              # « {"auths":{}} » et un fichier vide n'y répondent pas.
+              if ! grep -q '"auths"[[:space:]]*:[[:space:]]*{[[:space:]]*"' "$COPIE"; then
                 echo "$source porte $SECRET, mais sans identifiants exploitables"
                 continue
               fi
