@@ -124,6 +124,18 @@ jobs:
             set -eu
             NS="$1"; SECRET="$2"
 
+            # Le contenu du Secret passe par un fichier : kubectl ne sait le
+            # relire que d'un chemin. Ce chemin doit être propre à l'exécution.
+            # La concurrence de ce workflow est groupée par release et par
+            # environnement, jamais par nœud : deux déploiements de releases
+            # différentes se croisent sans se voir, et un chemin fixe aurait
+            # fait installer à l'un l'identifiant que l'autre était en train
+            # d'écrire, ou un fichier à demi rempli.
+            COPIE=$(mktemp)
+            # Le nettoyage survit à l'échec : un identifiant de registre n'a
+            # rien à faire sur le disque du nœud parce qu'un kubectl a échoué.
+            trap 'rm -f "$COPIE"' EXIT HUP INT TERM
+
             # helm crée bien le namespace, mais plus tard : le Secret doit y
             # être avant que le premier pod tente son tirage.
             #
@@ -142,12 +154,11 @@ jobs:
               [ "$source" = "$NS" ] && continue
               kubectl -n "$source" get secret "$SECRET" >/dev/null 2>&1 || continue
               kubectl -n "$source" get secret "$SECRET" \
-                -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > /tmp/pull.json
+                -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > "$COPIE"
               kubectl -n "$NS" create secret generic "$SECRET" \
                 --type=kubernetes.io/dockerconfigjson \
-                --from-file=.dockerconfigjson=/tmp/pull.json \
+                --from-file=.dockerconfigjson="$COPIE" \
                 --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-              rm -f /tmp/pull.json
               echo "$SECRET recopie depuis $source vers $NS"
               exit 0
             done
