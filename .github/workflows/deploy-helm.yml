@@ -153,8 +153,20 @@ jobs:
             for source in mc-dev mc-prod mc-preprod; do
               [ "$source" = "$NS" ] && continue
               kubectl -n "$source" get secret "$SECRET" >/dev/null 2>&1 || continue
-              kubectl -n "$source" get secret "$SECRET" \
-                -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > "$COPIE"
+              # Le décodage est gardé, et pas seulement tenté. « base64 » est
+              # le dernier maillon du tube, c'est donc lui qui lui donne son
+              # code de retour, et « set -e » quittait le script sur un
+              # « invalid input » qui ne nomme ni le Secret ni le namespace.
+              # Un seul voisin au contenu abîmé faisait ainsi échouer un
+              # déploiement que le voisin suivant aurait servi — alors que
+              # parcourir les voisins est précisément ce que cette boucle est
+              # là pour faire.
+              if ! kubectl -n "$source" get secret "$SECRET" \
+                   -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > "$COPIE" 2>/dev/null
+              then
+                echo "$source porte $SECRET, mais son contenu ne se décode pas"
+                continue
+              fi
 
               # Exister ne suffit pas : un Secret peut porter ce nom sans porter
               # la clé attendue. Le jsonpath rend alors une chaîne vide, le tube
