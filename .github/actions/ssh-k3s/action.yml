@@ -1,0 +1,107 @@
+name: Accès SSH au nœud k3s
+description: Installe la clé de déploiement, et exécute au besoin un script sur le nœud.
+
+# Le même bloc de six lignes — install -d, printf, chmod — existait en cinq
+# exemplaires dans l'organisation. Il n'y a rien à y décider, donc rien qui
+# justifie de le recopier ; et une correction de sécurité sur la préparation de
+# clé aurait dû être appliquée cinq fois, en espérant n'en oublier aucune.
+#
+# Deux usages :
+#
+#   - préparer la clé, et rien d'autre. La commande ssh complète est rendue en
+#     sortie, pour rsync ou pour un appel sur mesure :
+#
+#       - uses: samflix-mc/.github/.github/actions/ssh-k3s@main
+#         id: ssh
+#         with: { cle: ..., hotes-connus: ..., utilisateur: ..., hote: ..., port: ... }
+#       - run: ${{ steps.ssh.outputs.commande }} "$USER@$HOTE" "uptime"
+#
+#   - exécuter un script sur le nœud, ce qui couvre la plupart des besoins :
+#
+#       with:
+#         script: |
+#           set -eu
+#           kubectl -n "$1" get pods
+#         arguments: mc-dev
+#
+# Le script part par l'entrée standard plutôt que dans la ligne de commande :
+# il n'est jamais relu par le shell local, donc aucune expansion imprévue, et
+# sa longueur n'est pas limitée.
+
+inputs:
+  cle:
+    description: Clé privée de déploiement
+    required: true
+  hotes-connus:
+    description: Contenu de known_hosts
+    required: true
+  utilisateur:
+    description: Utilisateur SSH
+    required: true
+  hote:
+    description: Hôte SSH
+    required: true
+  port:
+    description: Port SSH
+    required: true
+  script:
+    description: Script à exécuter sur le nœud ; vide pour ne faire que poser la clé
+    required: false
+    default: ""
+  arguments:
+    description: Arguments positionnels passés au script ($1, $2, …)
+    required: false
+    default: ""
+
+outputs:
+  commande:
+    description: Commande ssh complète, options comprises, sans la destination
+    value: ${{ steps.cle.outputs.commande }}
+  destination:
+    description: utilisateur@hôte
+    value: ${{ steps.cle.outputs.destination }}
+
+runs:
+  using: composite
+  steps:
+    - id: cle
+      shell: bash
+      env:
+        CLE: ${{ inputs.cle }}
+        HOTES_CONNUS: ${{ inputs.hotes-connus }}
+        UTILISATEUR: ${{ inputs.utilisateur }}
+        HOTE: ${{ inputs.hote }}
+        PORT: ${{ inputs.port }}
+      run: |
+        set -euo pipefail
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "$CLE" > ~/.ssh/id_deploy
+        chmod 600 ~/.ssh/id_deploy
+        printf '%s\n' "$HOTES_CONNUS" > ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
+        {
+          # StrictHostKeyChecking=yes, jamais « accept-new » : la clé du nœud
+          # est connue et fournie en secret. L'accepter à la volée reviendrait
+          # à déployer sur n'importe quelle machine qui répondrait à sa place.
+          #
+          # ServerAliveInterval garde la session ouverte pendant les opérations
+          # longues — un helm --wait de vingt minutes ne produit aucun octet
+          # sur le canal, et la coupure ferait échouer un déploiement réussi.
+          echo "commande=ssh -i $HOME/.ssh/id_deploy -p $PORT" \
+               "-o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+               "-o StrictHostKeyChecking=yes -o ServerAliveInterval=30"
+          echo "destination=$UTILISATEUR@$HOTE"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Exécuter sur le nœud
+      if: inputs.script != ''
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.script }}
+        ARGUMENTS: ${{ inputs.arguments }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$SCRIPT" > "$RUNNER_TEMP/distant.sh"
+        # shellcheck disable=SC2086
+        ${{ steps.cle.outputs.commande }} "${{ steps.cle.outputs.destination }}" \
+          "sh -s -- $ARGUMENTS" < "$RUNNER_TEMP/distant.sh"
