@@ -164,17 +164,41 @@ jobs:
 
           lire() { ENV="$ENV" yq -r "$1" "$T"; }
 
-          NS=$(lire '.environnements[strenv(ENV)].namespace')
-          REGISTRE=$(yq -r '.communs.registre' "$T")
-          TAG=$(lire '.environnements[strenv(ENV)].contenu.tag')
-          PULL=$(lire '.environnements[strenv(ENV)].contenu.pullPolicy')
-          SECRET=$(yq -r '.communs.pullSecret' "$T")
-          URL=$(lire '.environnements[strenv(ENV)].site.url')
-          PACK=$(lire '.environnements[strenv(ENV)].site.pack')
+          # Une clé absente ne fait pas échouer yq : elle rend la chaîne
+          # « null », que plus rien ensuite ne distingue d'une valeur. La
+          # résolution allait donc jusqu'au bout et l'appelant partait
+          # déployer avec : helm crée sans broncher un namespace nommé
+          # « null », et tire une image « mc-content:null » qu'il n'obtiendra
+          # jamais. Le défaut se lisait à l'autre bout de la chaîne, très loin
+          # de la ligne oubliée qui l'a causé.
+          #
+          # Le cas de « site.pack » est plus sournois encore : « null » n'est
+          # pas « true », l'appelant saute alors la publication du pack et sa
+          # vérification, et rien n'échoue nulle part.
+          exige() {
+            v=$(lire "$1")
+            case "$v" in
+              ""|null)
+                echo "::error::$1 est absent de la table pour l'environnement $ENV" >&2
+                exit 1 ;;
+            esac
+            printf '%s\n' "$v"
+          }
+
+          NS=$(exige '.environnements[strenv(ENV)].namespace')
+          REGISTRE=$(exige '.communs.registre')
+          TAG=$(exige '.environnements[strenv(ENV)].contenu.tag')
+          PULL=$(exige '.environnements[strenv(ENV)].contenu.pullPolicy')
+          SECRET=$(exige '.communs.pullSecret')
+          URL=$(exige '.environnements[strenv(ENV)].site.url')
+          PACK=$(exige '.environnements[strenv(ENV)].site.pack')
           HOTES=$(lire '.environnements[strenv(ENV)].site.hotes | join(",")')
+          # Ces deux-là sont les seuls à avoir le droit d'être vides : la
+          # préproduction n'héberge aucun serveur Minecraft, et c'est ainsi
+          # que la table le dit.
           PORT=$(lire '.environnements[strenv(ENV)].jeu.port')
           DEPL=$(lire '.environnements[strenv(ENV)].jeu.deploiements | join(" ")')
-          NOEUD=$(yq -r '.communs.noeud' "$T")
+          NOEUD=$(exige '.communs.noeud')
 
           # Un port absent se dit « null » en YAML et vaut la chaîne « null »
           # une fois sorti de yq. Le rendre vide ici évite que chaque appelant
