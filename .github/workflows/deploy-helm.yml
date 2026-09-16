@@ -146,7 +146,7 @@ jobs:
               || kubectl create namespace "$NS" >/dev/null
 
             if kubectl -n "$NS" get secret "$SECRET" >/dev/null 2>&1; then
-              echo "$SECRET deja present dans $NS"
+              echo "$SECRET déjà présent dans $NS"
               exit 0
             fi
 
@@ -159,11 +159,11 @@ jobs:
                 --type=kubernetes.io/dockerconfigjson \
                 --from-file=.dockerconfigjson="$COPIE" \
                 --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-              echo "$SECRET recopie depuis $source vers $NS"
+              echo "$SECRET recopié depuis $source vers $NS"
               exit 0
             done
 
-            echo "aucun $SECRET a recopier : le creer une fois a la main" >&2
+            echo "aucun $SECRET à recopier : le créer une fois à la main" >&2
             exit 1
 
       - name: Synchroniser le chart
