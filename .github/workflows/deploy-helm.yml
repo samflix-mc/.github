@@ -11,6 +11,7 @@ name: Déploiement Helm (réutilisable)
 #         release: mon-service
 #         namespace: mc-dev
 #         environment: dev
+#         pull-secret: ghcr-pull      # si le chart tire une image privée
 #       secrets: inherit
 #
 # helm tourne SUR LE SERVEUR : le kubeconfig K3s y pointe sur 127.0.0.1:6443,
@@ -47,12 +48,39 @@ on:
         description: Délai maximal de helm --wait
         type: string
         default: 5m
+      pull-secret:
+        description: >
+          Secret de tirage à garantir dans le namespace avant de déployer ;
+          vide si le chart ne tire aucune image privée.
+        type: string
+        default: ""
+      artefact-chart:
+        description: >
+          Nom d'un artefact contenant un chart construit, déposé par-dessus
+          celui du checkout ; vide si le chart est entièrement versionné.
+        type: string
+        default: ""
 
 jobs:
   deploy:
     name: ${{ inputs.release }} → ${{ inputs.environment }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    # Large, et volontairement. « --atomic » annule le déploiement en cas
+    # d'échec, et cette annulation attend elle aussi « --timeout » : le pire
+    # cas est donc le double de ce que l'appelant demande. mc-server demande
+    # 25m pour la première génération du monde, ce qui fait 50m, auxquels
+    # s'ajoutent le checkout, l'artefact, la garantie du Secret et la
+    # synchronisation du chart.
+    #
+    # À 30 minutes, GitHub coupait le job en pleine annulation. La release
+    # restait alors en « pending-rollback », et le déploiement suivant refusait
+    # de partir sur un « another operation is in progress » qu'il faut défaire
+    # à la main sur le nœud — soit exactement l'état intermédiaire que
+    # « cancel-in-progress: false », plus bas, existe pour éviter.
+    #
+    # À garder au-dessus du double de la plus grande valeur de « timeout »
+    # qu'un appelant passe.
+    timeout-minutes: 70
     # Un seul déploiement à la fois par release et par environnement, et on
     # n'interrompt pas celui en cours : un helm interrompu laisse la release
     # dans un état intermédiaire.
@@ -64,33 +92,162 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Préparer la clé SSH
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-        run: |
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
+      # Un chart peut avoir des fichiers construits — une page compilée, par
+      # exemple. Ce job refait son propre checkout : ce qu'un job précédent a
+      # produit n'y est pas, et serait silencieusement remplacé par la version
+      # versionnée, ou par rien du tout.
+      #
+      # L'artefact est déposé par-dessus le checkout, pas à la place : le chart
+      # reste versionné, seuls ses fichiers générés viennent d'ailleurs.
+      - name: Récupérer le chart construit
+        if: inputs.artefact-chart != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artefact-chart }}
+          path: ${{ inputs.chart-path }}
+
+      - uses: samflix-mc/.github/.github/actions/ssh-k3s@main
+        id: ssh
+        with:
+          cle: ${{ secrets.SSH_PRIVATE_KEY }}
+          hotes-connus: ${{ secrets.SSH_KNOWN_HOSTS }}
+          utilisateur: ${{ secrets.SSH_USER }}
+          hote: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+
+      # Une image privée se tire grâce à un Secret qui vit dans le namespace.
+      # Quand il manque, le pod reste en ImagePullBackOff, « helm --atomic »
+      # annule tout le déploiement, et le message d'échec est un « context
+      # deadline exceeded » qui ne dit rien de la cause. C'est arrivé sur
+      # mc-preprod, occupé par un seul chart et donc dépourvu du Secret que les
+      # autres namespaces avaient reçu en installant mc-server.
+      #
+      # Cette étape ne fabrique aucun identifiant et n'en fait transiter aucun
+      # par la CI : elle recopie celui qui existe déjà, d'un namespace voisin,
+      # de nœud à nœud. Idempotente, et sans effet quand le Secret est là.
+      - name: Garantir le Secret de tirage
+        if: inputs.pull-secret != ''
+        uses: samflix-mc/.github/.github/actions/ssh-k3s@main
+        with:
+          cle: ${{ secrets.SSH_PRIVATE_KEY }}
+          hotes-connus: ${{ secrets.SSH_KNOWN_HOSTS }}
+          utilisateur: ${{ secrets.SSH_USER }}
+          hote: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          arguments: ${{ inputs.namespace }} ${{ inputs.pull-secret }}
+          script: |
+            set -eu
+            NS="$1"; SECRET="$2"
+
+            # Le contenu du Secret passe par un fichier : kubectl ne sait le
+            # relire que d'un chemin. Ce chemin doit être propre à l'exécution.
+            # La concurrence de ce workflow est groupée par release et par
+            # environnement, jamais par nœud : deux déploiements de releases
+            # différentes se croisent sans se voir, et un chemin fixe aurait
+            # fait installer à l'un l'identifiant que l'autre était en train
+            # d'écrire, ou un fichier à demi rempli.
+            COPIE=$(mktemp)
+            # Le nettoyage survit à l'échec : un identifiant de registre n'a
+            # rien à faire sur le disque du nœud parce qu'un kubectl a échoué.
+            trap 'rm -f "$COPIE"' EXIT HUP INT TERM
+
+            # helm crée bien le namespace, mais plus tard : le Secret doit y
+            # être avant que le premier pod tente son tirage.
+            #
+            # Créé seulement s'il manque. Un « apply » inconditionnel poserait
+            # l'annotation last-applied-configuration sur un namespace
+            # existant, que ce workflow n'a pas créé et n'a pas à s'approprier.
+            kubectl get namespace "$NS" >/dev/null 2>&1 \
+              || kubectl create namespace "$NS" >/dev/null
+
+            if kubectl -n "$NS" get secret "$SECRET" >/dev/null 2>&1; then
+              echo "$SECRET déjà présent dans $NS"
+              exit 0
+            fi
+
+            # Liste blanche, et non « get secret -A ». Elle se démode — un
+            # environnement ajouté à la table n'y sera pas — mais elle se
+            # démode bruyamment : le message de la fin nomme le geste à faire.
+            # Découvrir les voisins ferait de n'importe quel namespace du nœud
+            # une source d'identifiants, et le contrôle ci-dessous ne sait pas
+            # distinguer des identifiants valides d'identifiants justes bien
+            # formés. Un échec franc et réparable vaut mieux qu'une recopie
+            # silencieuse des mauvais.
+            for source in mc-dev mc-prod mc-preprod; do
+              [ "$source" = "$NS" ] && continue
+              kubectl -n "$source" get secret "$SECRET" >/dev/null 2>&1 || continue
+              # Le décodage est gardé, et pas seulement tenté. « base64 » est
+              # le dernier maillon du tube, c'est donc lui qui lui donne son
+              # code de retour, et « set -e » quittait le script sur un
+              # « invalid input » qui ne nomme ni le Secret ni le namespace.
+              # Un seul voisin au contenu abîmé faisait ainsi échouer un
+              # déploiement que le voisin suivant aurait servi — alors que
+              # parcourir les voisins est précisément ce que cette boucle est
+              # là pour faire.
+              if ! kubectl -n "$source" get secret "$SECRET" \
+                   -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > "$COPIE" 2>/dev/null
+              then
+                echo "$source porte $SECRET, mais son contenu ne se décode pas"
+                continue
+              fi
+
+              # Exister ne suffit pas : un Secret peut porter ce nom sans porter
+              # la clé attendue. Le jsonpath rend alors une chaîne vide, le tube
+              # n'en dit rien, et on recopierait un Secret bien présent mais
+              # creux — que le contrôle de présence, plus bas, déclarerait bon.
+              # Le pod échouerait quand même à tirer l'image, et cette étape
+              # jurerait avoir fait son travail.
+              #
+              # On passe au namespace suivant plutôt que d'échouer : un voisin
+              # peut très bien en porter un valide.
+              # Test textuel plutôt que jq : ce workflow est partagé par tous
+              # les charts de l'organisation, et lui imposer un outil de plus
+              # sur le nœud pour une vérification de cette taille serait mal
+              # échanger. Le motif cherche une entrée réelle sous « auths » —
+              # « {"auths":{}} » et un fichier vide n'y répondent pas.
+              if ! grep -q '"auths"[[:space:]]*:[[:space:]]*{[[:space:]]*"' "$COPIE"; then
+                echo "$source porte $SECRET, mais sans identifiants exploitables"
+                continue
+              fi
+
+              kubectl -n "$NS" create secret generic "$SECRET" \
+                --type=kubernetes.io/dockerconfigjson \
+                --from-file=.dockerconfigjson="$COPIE" \
+                --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+              # Le tube masque l'échec de son premier maillon : « sh » n'a pas
+              # de pipefail, et le code de retour est celui du dernier. Un
+              # « create » qui échoue laisserait donc afficher « recopié » puis
+              # sortir 0, sans qu'aucun Secret ait été posé — et le symptôme
+              # serait exactement l'ImagePullBackOff que cette étape existe pour
+              # éviter, avec en prime la certitude trompeuse qu'elle a fait son
+              # travail.
+              #
+              # On constate donc la présence du Secret, au lieu de faire
+              # confiance à un code de retour qui ne dit rien.
+              kubectl -n "$NS" get secret "$SECRET" >/dev/null 2>&1 || {
+                echo "::error::la recopie de $SECRET depuis $source vers $NS n'a rien posé" >&2
+                exit 1
+              }
+
+              echo "$SECRET recopié depuis $source vers $NS"
+              exit 0
+            done
+
+            echo "aucun $SECRET à recopier : le créer une fois à la main" >&2
+            exit 1
 
       - name: Synchroniser le chart
         env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEST: ${{ steps.ssh.outputs.destination }}
         run: |
-          SSH_CMD="ssh -i ~/.ssh/id_deploy -p $SSH_PORT -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
-          $SSH_CMD "$SSH_USER@$SSH_HOST" "mkdir -p \"$REMOTE_DIR/chart\""
-          rsync -az --delete -e "$SSH_CMD" \
-            "./${{ inputs.chart-path }}/" "$SSH_USER@$SSH_HOST:$REMOTE_DIR/chart/"
+          ${{ steps.ssh.outputs.commande }} "$DEST" "mkdir -p \"$REMOTE_DIR/chart\""
+          rsync -az --delete -e "${{ steps.ssh.outputs.commande }}" \
+            "./${{ inputs.chart-path }}/" "$DEST:$REMOTE_DIR/chart/"
 
       - name: helm upgrade
         env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEST: ${{ steps.ssh.outputs.destination }}
           SET: ${{ inputs.set }}
         run: |
           # Les guillemets simples sont indispensables : la valeur passée à
@@ -102,10 +259,7 @@ jobs:
           # passait inaperçu tant qu'un environnement n'avait qu'un hôte.
           EXTRA=""
           [ -n "$SET" ] && EXTRA="--set '$SET'"
-          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" \
-            -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
-            -o ServerAliveInterval=30 \
-            "$SSH_USER@$SSH_HOST" \
+          ${{ steps.ssh.outputs.commande }} "$DEST" \
             "helm upgrade --install '${{ inputs.release }}' \"\$HOME/$REMOTE_DIR/chart\" \
                --namespace '${{ inputs.namespace }}' --create-namespace \
                -f \"\$HOME/$REMOTE_DIR/chart/values.yaml\" $EXTRA \
@@ -113,10 +267,27 @@ jobs:
 
       - name: Vérifier
         if: inputs.verify-url != ''
+        env:
+          URL: ${{ inputs.verify-url }}
         run: |
-          # Traefik met quelques secondes à basculer sur le nouveau pod.
-          sleep 10
-          url="${{ inputs.verify-url }}"
-          code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$url")
-          echo "$url → HTTP $code" >> "$GITHUB_STEP_SUMMARY"
-          [ "$code" = "200" ] || { echo "::error::$url a répondu $code"; exit 1; }
+          # curl sort non nul quand il n'a pas pu joindre l'hôte du tout — un
+          # nom pas encore propagé, une route Traefik pas encore basculée, un
+          # refus de connexion. L'affectation reprenait ce code, « set -e »
+          # tuait l'étape sur-le-champ, et ni le résumé ni le message d'erreur
+          # n'étaient atteints : le journal ne disait plus que « exit code 7 »,
+          # sans nommer l'URL ni ce qu'elle avait répondu. Le seul cas où cette
+          # étape a quelque chose à raconter était aussi le seul où elle se
+          # taisait.
+          #
+          # Et une seule tentative après dix secondes est un tirage au sort :
+          # « helm --wait » garantit le pod prêt, pas la route publique qui y
+          # mène. Un déploiement parfaitement sain passait pour un échec.
+          code=000
+          for essai in 1 2 3 4 5 6; do
+            sleep 5
+            code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$URL" || true)
+            [ "$code" = "200" ] && break
+            echo "tentative $essai : $URL → HTTP $code"
+          done
+          echo "$URL → HTTP $code" >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" = "200" ] || { echo "::error::$URL a répondu $code"; exit 1; }

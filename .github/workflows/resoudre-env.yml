@@ -1,0 +1,244 @@
+name: Résoudre l'environnement (réutilisable)
+
+# Traduit une référence git en environnement, puis lit tout ce que cet
+# environnement vaut dans environnements.yaml, à la racine de ce dépôt.
+#
+#   jobs:
+#     env:
+#       uses: samflix-mc/.github/.github/workflows/resoudre-env.yml@main
+#       with:
+#         environnement: ${{ inputs.environnement }}   # facultatif
+#
+# Puis, dans les jobs suivants : ${{ needs.env.outputs.namespace }}, etc.
+#
+# Ce workflow existe pour supprimer une duplication précise : trois dépôts
+# portaient chacun un job « prepare » avec son propre « case » shell, et les
+# trois ne s'accordaient ni sur les environnements existants, ni sur la branche
+# qui déploie quoi. Le tag de contenu de la production, lui, était recopié à la
+# main à deux endroits — alors que la concordance entre ce que le client charge
+# et ce que les serveurs installent est la raison d'être de toute la
+# mutualisation.
+#
+# Rien ici ne décide : tout est dans la table. Ajouter un environnement, c'est
+# ajouter une entrée, pas toucher un workflow.
+
+on:
+  workflow_call:
+    inputs:
+      environnement:
+        description: Force un environnement ; vide = déduit de la référence git
+        type: string
+        default: ""
+    outputs:
+      environnement:
+        description: dev, preprod ou prod
+        value: ${{ jobs.resoudre.outputs.environnement }}
+      namespace:
+        description: Namespace Kubernetes cible
+        value: ${{ jobs.resoudre.outputs.namespace }}
+      contenu-image:
+        description: Image de contenu, sans le tag
+        value: ${{ jobs.resoudre.outputs.contenu-image }}
+      contenu-tag:
+        description: Tag de l'image de contenu pour cet environnement
+        value: ${{ jobs.resoudre.outputs.contenu-tag }}
+      contenu-pull:
+        description: imagePullPolicy à appliquer à l'image de contenu
+        value: ${{ jobs.resoudre.outputs.contenu-pull }}
+      pull-secret:
+        description: Nom du Secret de tirage à garantir dans le namespace
+        value: ${{ jobs.resoudre.outputs.pull-secret }}
+      site-hotes:
+        description: Hôtes du site, au format liste helm — {a,b}
+        value: ${{ jobs.resoudre.outputs.site-hotes }}
+      site-url:
+        description: URL à interroger après déploiement du site
+        value: ${{ jobs.resoudre.outputs.site-url }}
+      site-pack:
+        description: true si ce site publie /pack/ dans cet environnement
+        value: ${{ jobs.resoudre.outputs.site-pack }}
+      jeu-port:
+        description: Port du proxy Minecraft ; vide s'il n'y a pas de serveurs
+        value: ${{ jobs.resoudre.outputs.jeu-port }}
+      jeu-deploiements:
+        description: Déploiements à recharger, séparés par des espaces ; vide s'il n'y en a pas
+        value: ${{ jobs.resoudre.outputs.jeu-deploiements }}
+      noeud:
+        description: Adresse publique du nœud k3s
+        value: ${{ jobs.resoudre.outputs.noeud }}
+
+jobs:
+  resoudre:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      environnement: ${{ steps.lire.outputs.environnement }}
+      namespace: ${{ steps.lire.outputs.namespace }}
+      contenu-image: ${{ steps.lire.outputs.contenu-image }}
+      contenu-tag: ${{ steps.lire.outputs.contenu-tag }}
+      contenu-pull: ${{ steps.lire.outputs.contenu-pull }}
+      pull-secret: ${{ steps.lire.outputs.pull-secret }}
+      site-hotes: ${{ steps.lire.outputs.site-hotes }}
+      site-url: ${{ steps.lire.outputs.site-url }}
+      site-pack: ${{ steps.lire.outputs.site-pack }}
+      jeu-port: ${{ steps.lire.outputs.jeu-port }}
+      jeu-deploiements: ${{ steps.lire.outputs.jeu-deploiements }}
+      noeud: ${{ steps.lire.outputs.noeud }}
+    steps:
+      # La table vit dans ce dépôt, pas dans l'appelant. Un workflow
+      # réutilisable s'exécute dans le contexte de l'appelant : sans dépôt
+      # explicite, actions/checkout ramènerait les sources de l'appelant.
+      #
+      # Ce dépôt est public, le checkout ne demande donc aucun jeton — c'est
+      # précisément pourquoi la table vit ici et non dans mc-content, qui est
+      # privé.
+      #
+      # Le dépôt et la référence sont ceux du commit qui fournit ce
+      # workflow-ci, et non « samflix-mc/.github@main » en dur : ce que
+      # l'appelant a écrit après le « @ » vaut alors pour la table autant que
+      # pour le code qui la lit. Sans cela, un appelant épinglé à un tag aurait
+      # suivi la table de la pointe sans le savoir, et une branche d'essai se
+      # serait essayée sur une table qu'elle ne modifie pas — il devenait
+      # impossible de mettre une entrée à l'épreuve avant de la fusionner.
+      #
+      # « job.workflow_sha », et non « github.workflow_sha » : ce dernier
+      # désigne le workflow de l'appelant, donc son commit à lui. Le contexte
+      # « job » porte bien, en plus de container et services, l'identité du
+      # workflow qui définit le job courant.
+      #
+      # Le dépôt reste nommé en clair, alors que « job.workflow_repository »
+      # existe : si jamais la valeur manquait, un « repository » vide ferait
+      # échouer le checkout de tous les déploiements de l'organisation, là
+      # qu'une « ref » vide retombe simplement sur la branche par défaut —
+      # c'est-à-dire sur le comportement d'avant. Entre deux façons de se
+      # tromper, autant choisir celle qui ne casse rien.
+      - uses: actions/checkout@v5
+        with:
+          repository: samflix-mc/.github
+          ref: ${{ job.workflow_sha }}
+          path: table
+
+      - name: Garantir yq
+        run: |
+          # Présent sur les images GitHub, mais la garantie n'y est pas écrite.
+          # Le télécharger coûte une seconde et rend ce workflow indépendant du
+          # contenu du runner.
+          if command -v yq >/dev/null 2>&1; then exit 0; fi
+          case "$(uname -m)" in
+            x86_64)  arch=amd64 ;;
+            aarch64) arch=arm64 ;;
+            *) echo "::error::architecture non gérée : $(uname -m)"; exit 1 ;;
+          esac
+          curl -sSfL -o "$RUNNER_TEMP/yq" \
+            "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_$arch"
+          chmod +x "$RUNNER_TEMP/yq"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - id: lire
+        env:
+          FORCE: ${{ inputs.environnement }}
+        run: |
+          set -euo pipefail
+          T=table/environnements.yaml
+
+          [ "$(yq -r '.schema' "$T")" = "1" ] \
+            || { echo "::error::environnements.yaml n'est pas en schéma 1"; exit 1; }
+
+          # --- Quel environnement -------------------------------------------
+          if [ -n "$FORCE" ]; then
+            ENV="$FORCE"
+            RAISON="forcé par l'appelant"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            # Le motif de la table décide, et lui seul. Sans cette vérification,
+            # n'importe quel tag valait prod : les appelants filtrent bien sur
+            # « v* » dans leur « on: », mais un workflow_dispatch lancé depuis
+            # une ref de tag ne passe par aucun filtre, et un appelant à venir
+            # peut fort bien n'en poser aucun. Un tag d'essai aurait alors
+            # déployé ce que jouent les joueurs.
+            MOTIF=$(yq -r '.declencheurs.tags.motif' "$T")
+            case "$GITHUB_REF_NAME" in
+              $MOTIF) ;;
+              *) echo "::error::le tag $GITHUB_REF_NAME ne correspond pas au motif $MOTIF de la table : aucun environnement ne lui est associé"; exit 1 ;;
+            esac
+            ENV=$(yq -r '.declencheurs.tags.environnement' "$T")
+            RAISON="tag $GITHUB_REF_NAME"
+          else
+            ENV=$(REF="$GITHUB_REF_NAME" yq -r \
+              '.declencheurs.branches[strenv(REF)] // .declencheurs.defaut' "$T")
+            RAISON="branche $GITHUB_REF_NAME"
+          fi
+
+          ENV="$ENV" yq -e '.environnements[strenv(ENV)]' "$T" >/dev/null 2>&1 \
+            || { echo "::error::environnement inconnu de la table : $ENV"; exit 1; }
+
+          lire() { ENV="$ENV" yq -r "$1" "$T"; }
+
+          # Une clé absente ne fait pas échouer yq : elle rend la chaîne
+          # « null », que plus rien ensuite ne distingue d'une valeur. La
+          # résolution allait donc jusqu'au bout et l'appelant partait
+          # déployer avec : helm crée sans broncher un namespace nommé
+          # « null », et tire une image « mc-content:null » qu'il n'obtiendra
+          # jamais. Le défaut se lisait à l'autre bout de la chaîne, très loin
+          # de la ligne oubliée qui l'a causé.
+          #
+          # Le cas de « site.pack » est plus sournois encore : « null » n'est
+          # pas « true », l'appelant saute alors la publication du pack et sa
+          # vérification, et rien n'échoue nulle part.
+          exige() {
+            v=$(lire "$1")
+            case "$v" in
+              ""|null)
+                echo "::error::la table ne donne rien pour « $1 », environnement $ENV" >&2
+                exit 1 ;;
+            esac
+            printf '%s\n' "$v"
+          }
+
+          NS=$(exige '.environnements[strenv(ENV)].namespace')
+          REGISTRE=$(exige '.communs.registre')
+          TAG=$(exige '.environnements[strenv(ENV)].contenu.tag')
+          PULL=$(exige '.environnements[strenv(ENV)].contenu.pullPolicy')
+          SECRET=$(exige '.communs.pullSecret')
+          URL=$(exige '.environnements[strenv(ENV)].site.url')
+          PACK=$(exige '.environnements[strenv(ENV)].site.pack')
+          HOTES=$(exige '.environnements[strenv(ENV)].site.hotes | join(",")')
+          # Ces deux-là sont les seuls à avoir le droit d'être vides : la
+          # préproduction n'héberge aucun serveur Minecraft, et c'est ainsi
+          # que la table le dit.
+          PORT=$(lire '.environnements[strenv(ENV)].jeu.port')
+          DEPL=$(lire '.environnements[strenv(ENV)].jeu.deploiements | join(" ")')
+          NOEUD=$(exige '.communs.noeud')
+
+          # Un port absent se dit « null » en YAML et vaut la chaîne « null »
+          # une fois sorti de yq. Le rendre vide ici évite que chaque appelant
+          # ait à connaître cette subtilité.
+          [ "$PORT" = null ] && PORT=""
+
+          {
+            echo "environnement=$ENV"
+            echo "namespace=$NS"
+            echo "contenu-image=$REGISTRE/mc-content"
+            echo "contenu-tag=$TAG"
+            echo "contenu-pull=$PULL"
+            echo "pull-secret=$SECRET"
+            # Format liste helm. Les accolades imposent des guillemets simples
+            # autour du --set côté appelant, sans quoi le shell distant applique
+            # son expansion et helm reçoit deux arguments.
+            echo "site-hotes={$HOTES}"
+            echo "site-url=$URL"
+            echo "site-pack=$PACK"
+            echo "jeu-port=$PORT"
+            echo "jeu-deploiements=$DEPL"
+            echo "noeud=$NOEUD"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### $ENV"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| déduit de | $RAISON |"
+            echo "| namespace | \`$NS\` |"
+            echo "| contenu | \`$REGISTRE/mc-content:$TAG\` ($PULL) |"
+            echo "| site | $URL · pack $PACK |"
+            echo "| jeu | ${PORT:-aucun serveur} · ${DEPL:-—} |"
+          } >> "$GITHUB_STEP_SUMMARY"

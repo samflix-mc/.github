@@ -1,0 +1,161 @@
+# =============================================================================
+# La table des environnements du réseau samflix
+# =============================================================================
+# Un seul endroit décide ce qu'est « dev », « preprod » et « prod ». Les
+# workflows n'en redécident rien : ils lisent, ils exécutent.
+#
+# Avant ce fichier, la correspondance environnement → namespace existait en
+# trois exemplaires — dans mc-server, dans mc-launcher-site, et en dur dans
+# mc-content — et les trois ne disaient pas la même chose. « preprod » existait
+# pour le site et pour le launcher, pas pour les serveurs ; mc-server écoutait
+# une branche « dev » qui n'a jamais existé.
+#
+# Elle vit ici, et pas dans mc-content, pour une raison mécanique : ce dépôt est
+# public, mc-content et mc-server ne le sont pas. Un dépôt privé peut lire ce
+# fichier sans jeton ; l'inverse demanderait d'en distribuer un.
+#
+# Rien de secret n'y entre. Les namespaces et les ports n'en sont pas, et l'IP
+# du nœud est de toute façon publique : le trafic Minecraft est du TCP brut, il
+# ne passe pas par Cloudflare, et le filtrage se fait par plage d'IP source, pas
+# par le secret de l'adresse (voir le README de mc-server).
+#
+# Lue par .github/workflows/resoudre-env.yml.
+# =============================================================================
+
+schema: 1
+
+# -----------------------------------------------------------------------------
+# Quelle référence git déploie quel environnement.
+#
+# La règle est la même pour les quatre dépôts, et c'est tout l'intérêt : avant,
+# « pousser sur main » avait quatre effets différents selon le dépôt.
+#
+#   main      → dev       l'intégration, continue et sans cérémonie
+#   dispatch  → preprod   une répétition se décide, elle ne se subit pas
+#   tag v*    → prod      la barrière d'approbation du pauvre, les règles de
+#                         protection d'environnement étant réservées au plan
+#                         Enterprise
+#
+# La production n'est donc jamais atteinte par un push, et la préproduction
+# jamais par une branche : elle n'a de sens que comme répétition avant tag.
+# -----------------------------------------------------------------------------
+declencheurs:
+  branches:
+    main: dev
+  # Un tag ne déploie que s'il correspond au motif — motif de shell, lu tel
+  # quel par resoudre-env.yml. Un tag qui n'y correspond pas n'a pas
+  # d'environnement : le workflow s'arrête et le dit, il ne retombe pas sur le
+  # défaut. La production ne se déduit pas d'un doute.
+  tags:
+    motif: v*
+    environnement: prod
+  # Environnement retenu quand rien ne correspond — une branche de travail, une
+  # pull request. Le plus inoffensif des trois.
+  defaut: dev
+
+# Ce qui ne dépend pas de l'environnement.
+communs:
+  registre: ghcr.io/samflix-mc
+  # IP publique du nœud k3s, en attendant les enregistrements DNS. Le jour où
+  # ils seront posés, seule cette ligne change : les ports ne bougent pas, un
+  # enregistrement SRV les masquant au joueur.
+  noeud: 78.46.100.5
+  # Middleware d'en-têtes de sécurité, déployé par le dépôt d'infrastructure.
+  securite:
+    middleware: security-headers
+    namespace: traefik-system
+  # Secret de tirage de l'image de contenu, qui est privée. Créé hors chart,
+  # une fois par namespace ; deploy-helm.yml le recopie d'un namespace voisin
+  # s'il manque.
+  pullSecret: ghcr-pull
+
+environnements:
+  # ---------------------------------------------------------------------------
+  # dev — on y essaie. Suit la pointe de mc-content, sans rien épingler.
+  # ---------------------------------------------------------------------------
+  dev:
+    namespace: mc-dev
+    contenu:
+      # « main » suit la branche : la publication d'une image y est reprise sans
+      # intervention. C'est le seul environnement où un tag mobile est le bon
+      # choix — ailleurs il ferait changer le contenu au premier redéploiement
+      # venu, y compris subi.
+      tag: main
+      # Always est nécessaire tant que le tag est mutable : la politique par
+      # défaut d'un tag autre que « latest » est IfNotPresent, et le nœud
+      # conserverait indéfiniment la première image tirée.
+      pullPolicy: Always
+    site:
+      hotes: [mc-launcher-dev.ggy.info]
+      url: https://mc-launcher-dev.ggy.info
+      pack: true
+    jeu:
+      port: 25566
+      # Déploiements à redémarrer quand une image de contenu est publiée.
+      # Une liste vide dit « pas de serveurs ici », et c'est une information,
+      # pas un oubli.
+      deploiements: [lobby, runtime, proxy]
+
+  # ---------------------------------------------------------------------------
+  # preprod — la répétition. Le site et le launcher y ont un environnement
+  # complet ; les serveurs Minecraft, non.
+  #
+  # Le nœud est unique et chaque réseau complet coûte de la RAM. Cela ne rend
+  # pas la préproduction inutile : le launcher, lui, distingue bien ses trois
+  # environnements, et une préproduction qui ne servirait pas de pack ne
+  # préparerait rien.
+  # ---------------------------------------------------------------------------
+  preprod:
+    namespace: mc-preprod
+    contenu:
+      tag: main
+      pullPolicy: Always
+    site:
+      # Un seul niveau de sous-domaine, et ce n'est pas esthétique : le
+      # certificat public de Cloudflare ne couvre que « ggy.info » et
+      # « *.ggy.info ». Tout nom à deux niveaux échoue en TLS côté visiteur,
+      # même si le certificat d'origine couvre *.staging. Les couvrir au bord
+      # demanderait Advanced Certificate Manager, payant.
+      hotes: [mc-launcher-staging.ggy.info]
+      url: https://mc-launcher-staging.ggy.info
+      pack: true
+    jeu:
+      port: null
+      deploiements: []
+
+  # ---------------------------------------------------------------------------
+  # prod — ce que jouent les joueurs.
+  # ---------------------------------------------------------------------------
+  prod:
+    namespace: mc-prod
+    contenu:
+      # VERSION DE CONTENU DE LA PRODUCTION — à changer explicitement.
+      #
+      # C'est désormais le seul endroit qui décide ce que jouent les joueurs, et
+      # ce que téléchargent leurs launchers. Avant, la même valeur était
+      # recopiée à la main dans mc-server et dans le workflow du site, sans que
+      # rien ne vérifie qu'elles concordaient — alors que cette concordance est
+      # la raison d'être de toute la mutualisation.
+      #
+      # Jamais « main » ici : un tag mobile ferait changer le contenu au premier
+      # redéploiement venu, sans que personne ne l'ait décidé.
+      #
+      # Pour livrer du contenu en production :
+      #   1. dans mc-content : git tag v1.2.0 && git push --tags
+      #   2. ici : contenu.tag: v1.2.0
+      #   3. dans mc-server et mc-launcher-site : poser un tag
+      tag: v0.1.0
+      # Le tag étant immuable, l'image en cache est forcément la bonne.
+      pullPolicy: IfNotPresent
+    site:
+      # Les deux orthographes sont routées : le DNS de ggy.info est joker, les
+      # deux résolvent, et « luncher » est une faute fréquente.
+      hotes: [mc-launcher.ggy.info, mc-luncher.ggy.info]
+      url: https://mc-launcher.ggy.info
+      # Passera à true quand un tag de mc-content portera launcher/ : le v0.1.0
+      # lui est antérieur, et l'initContainer échouerait volontairement — ce qui
+      # est le comportement voulu, mais un piège inutile à armer d'avance.
+      pack: false
+    jeu:
+      port: 25565
+      deploiements: [lobby, runtime, proxy]
