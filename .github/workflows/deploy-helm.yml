@@ -165,6 +165,14 @@ jobs:
               exit 0
             fi
 
+            # Liste blanche, et non « get secret -A ». Elle se démode — un
+            # environnement ajouté à la table n'y sera pas — mais elle se
+            # démode bruyamment : le message de la fin nomme le geste à faire.
+            # Découvrir les voisins ferait de n'importe quel namespace du nœud
+            # une source d'identifiants, et le contrôle ci-dessous ne sait pas
+            # distinguer des identifiants valides d'identifiants justes bien
+            # formés. Un échec franc et réparable vaut mieux qu'une recopie
+            # silencieuse des mauvais.
             for source in mc-dev mc-prod mc-preprod; do
               [ "$source" = "$NS" ] && continue
               kubectl -n "$source" get secret "$SECRET" >/dev/null 2>&1 || continue

@@ -101,8 +101,17 @@ jobs:
       # serait essayée sur une table qu'elle ne modifie pas — il devenait
       # impossible de mettre une entrée à l'épreuve avant de la fusionner.
       #
-      # « job.workflow_* », et non « github.workflow_* » : ces derniers
-      # désignent le workflow de l'appelant, donc son dépôt et son commit à lui.
+      # « job.workflow_sha », et non « github.workflow_sha » : ce dernier
+      # désigne le workflow de l'appelant, donc son commit à lui. Le contexte
+      # « job » porte bien, en plus de container et services, l'identité du
+      # workflow qui définit le job courant.
+      #
+      # Le dépôt reste nommé en clair, alors que « job.workflow_repository »
+      # existe : si jamais la valeur manquait, un « repository » vide ferait
+      # échouer le checkout de tous les déploiements de l'organisation, là
+      # qu'une « ref » vide retombe simplement sur la branche par défaut —
+      # c'est-à-dire sur le comportement d'avant. Entre deux façons de se
+      # tromper, autant choisir celle qui ne casse rien.
       - uses: actions/checkout@v5
         with:
           repository: samflix-mc/.github
