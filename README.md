@@ -123,6 +123,10 @@ donc aucune expansion imprévue, et sa longueur n'est pas limitée.
       kubectl -n "$1" get pods
 ```
 
+Les arguments sont découpés sur les blancs par le runner, puis reposés un par
+un entre quotes en tête du script : un `;` ou un `$(...)` arrive au script comme
+un argument, il n'est pas exécuté par le shell du nœud.
+
 Sans `script`, l'action se contente de poser la clé et rend la commande `ssh`
 complète en sortie (`commande`, `destination`), pour `rsync` ou un appel sur
 mesure.

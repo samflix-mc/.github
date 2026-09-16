@@ -27,6 +27,11 @@ description: Installe la clé de déploiement, et exécute au besoin un script s
 # Le script part par l'entrée standard plutôt que dans la ligne de commande :
 # il n'est jamais relu par le shell local, donc aucune expansion imprévue, et
 # sa longueur n'est pas limitée.
+#
+# Les arguments l'accompagnent par le même canal : le runner les découpe sur
+# les blancs, puis les repose un par un, entre quotes, dans un « set -- » placé
+# en tête du script. La ligne de commande distante ne contient donc rien qui
+# vienne de l'appelant, et le shell du nœud n'a plus rien à y interpréter.
 
 inputs:
   cle:
@@ -101,7 +106,36 @@ runs:
         ARGUMENTS: ${{ inputs.arguments }}
       run: |
         set -euo pipefail
-        printf '%s\n' "$SCRIPT" > "$RUNNER_TEMP/distant.sh"
+
+        # Les arguments sont découpés ici, et plus sur le nœud. Interpolés dans
+        # la commande distante, ils étaient relus par le shell de connexion :
+        # un « ; » ou un « $(...) » y aurait été exécuté au lieu d'arriver au
+        # script comme un argument parmi d'autres.
+        #
+        # Le découpage sur les blancs est conservé, lui : mc-server passe sa
+        # liste de déploiements dans un seul champ et compte sur « $@ » pour la
+        # parcourir. « set -f » écarte au passage l'expansion des motifs, pour
+        # qu'un argument « * » reste une étoile.
+        set -f
+        # shellcheck disable=SC2206
+        MOTS=($ARGUMENTS)
+        set +f
+
+        # Chaque mot repart entre quotes simples, la seule citation qu'aucun
+        # shell ne réinterprète. « set -- » les repose en tête du script, donc
+        # $1, $2… y valent exactement ce que l'appelant a écrit.
+        POSITIONNELS="set --"
+        for mot in "${MOTS[@]}"; do
+          POSITIONNELS="$POSITIONNELS '$(printf '%s' "$mot" | sed "s/'/'\\\\''/g")'"
+        done
+
+        {
+          printf '%s\n' "$POSITIONNELS"
+          printf '%s\n' "$SCRIPT"
+        } > "$RUNNER_TEMP/distant.sh"
+
+        # « sh -s », sans le moindre argument : la ligne de commande distante
+        # ne contient plus rien qui vienne de l'appelant.
         # shellcheck disable=SC2086
         ${{ steps.cle.outputs.commande }} "${{ steps.cle.outputs.destination }}" \
-          "sh -s -- $ARGUMENTS" < "$RUNNER_TEMP/distant.sh"
+          "sh -s" < "$RUNNER_TEMP/distant.sh"
