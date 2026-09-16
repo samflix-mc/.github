@@ -159,6 +159,22 @@ jobs:
                 --type=kubernetes.io/dockerconfigjson \
                 --from-file=.dockerconfigjson="$COPIE" \
                 --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+              # Le tube masque l'échec de son premier maillon : « sh » n'a pas
+              # de pipefail, et le code de retour est celui du dernier. Un
+              # « create » qui échoue laisserait donc afficher « recopié » puis
+              # sortir 0, sans qu'aucun Secret ait été posé — et le symptôme
+              # serait exactement l'ImagePullBackOff que cette étape existe pour
+              # éviter, avec en prime la certitude trompeuse qu'elle a fait son
+              # travail.
+              #
+              # On constate donc la présence du Secret, au lieu de faire
+              # confiance à un code de retour qui ne dit rien.
+              kubectl -n "$NS" get secret "$SECRET" >/dev/null 2>&1 || {
+                echo "::error::la recopie de $SECRET depuis $source vers $NS n'a rien posé" >&2
+                exit 1
+              }
+
               echo "$SECRET recopié depuis $source vers $NS"
               exit 0
             done
