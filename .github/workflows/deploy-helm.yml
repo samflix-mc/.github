@@ -244,10 +244,27 @@ jobs:
 
       - name: Vérifier
         if: inputs.verify-url != ''
+        env:
+          URL: ${{ inputs.verify-url }}
         run: |
-          # Traefik met quelques secondes à basculer sur le nouveau pod.
-          sleep 10
-          url="${{ inputs.verify-url }}"
-          code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$url")
-          echo "$url → HTTP $code" >> "$GITHUB_STEP_SUMMARY"
-          [ "$code" = "200" ] || { echo "::error::$url a répondu $code"; exit 1; }
+          # curl sort non nul quand il n'a pas pu joindre l'hôte du tout — un
+          # nom pas encore propagé, une route Traefik pas encore basculée, un
+          # refus de connexion. L'affectation reprenait ce code, « set -e »
+          # tuait l'étape sur-le-champ, et ni le résumé ni le message d'erreur
+          # n'étaient atteints : le journal ne disait plus que « exit code 7 »,
+          # sans nommer l'URL ni ce qu'elle avait répondu. Le seul cas où cette
+          # étape a quelque chose à raconter était aussi le seul où elle se
+          # taisait.
+          #
+          # Et une seule tentative après dix secondes est un tirage au sort :
+          # « helm --wait » garantit le pod prêt, pas la route publique qui y
+          # mène. Un déploiement parfaitement sain passait pour un échec.
+          code=000
+          for essai in 1 2 3 4 5 6; do
+            sleep 5
+            code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$URL" || true)
+            [ "$code" = "200" ] && break
+            echo "tentative $essai : $URL → HTTP $code"
+          done
+          echo "$URL → HTTP $code" >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" = "200" ] || { echo "::error::$URL a répondu $code"; exit 1; }
