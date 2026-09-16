@@ -65,7 +65,22 @@ jobs:
   deploy:
     name: ${{ inputs.release }} → ${{ inputs.environment }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    # Large, et volontairement. « --atomic » annule le déploiement en cas
+    # d'échec, et cette annulation attend elle aussi « --timeout » : le pire
+    # cas est donc le double de ce que l'appelant demande. mc-server demande
+    # 25m pour la première génération du monde, ce qui fait 50m, auxquels
+    # s'ajoutent le checkout, l'artefact, la garantie du Secret et la
+    # synchronisation du chart.
+    #
+    # À 30 minutes, GitHub coupait le job en pleine annulation. La release
+    # restait alors en « pending-rollback », et le déploiement suivant refusait
+    # de partir sur un « another operation is in progress » qu'il faut défaire
+    # à la main sur le nœud — soit exactement l'état intermédiaire que
+    # « cancel-in-progress: false », plus bas, existe pour éviter.
+    #
+    # À garder au-dessus du double de la plus grande valeur de « timeout »
+    # qu'un appelant passe.
+    timeout-minutes: 70
     # Un seul déploiement à la fois par release et par environnement, et on
     # n'interrompt pas celui en cours : un helm interrompu laisse la release
     # dans un état intermédiaire.
