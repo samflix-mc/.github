@@ -92,10 +92,21 @@ jobs:
       # Ce dépôt est public, le checkout ne demande donc aucun jeton — c'est
       # précisément pourquoi la table vit ici et non dans mc-content, qui est
       # privé.
+      #
+      # Le dépôt et la référence sont ceux du commit qui fournit ce
+      # workflow-ci, et non « samflix-mc/.github@main » en dur : ce que
+      # l'appelant a écrit après le « @ » vaut alors pour la table autant que
+      # pour le code qui la lit. Sans cela, un appelant épinglé à un tag aurait
+      # suivi la table de la pointe sans le savoir, et une branche d'essai se
+      # serait essayée sur une table qu'elle ne modifie pas — il devenait
+      # impossible de mettre une entrée à l'épreuve avant de la fusionner.
+      #
+      # « job.workflow_* », et non « github.workflow_* » : ces derniers
+      # désignent le workflow de l'appelant, donc son dépôt et son commit à lui.
       - uses: actions/checkout@v5
         with:
-          repository: samflix-mc/.github
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: table
 
       - name: Garantir yq
