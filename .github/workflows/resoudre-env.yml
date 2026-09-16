@@ -129,7 +129,18 @@ jobs:
             ENV="$FORCE"
             RAISON="forcé par l'appelant"
           elif [ "$GITHUB_REF_TYPE" = tag ]; then
-            ENV=$(yq -r '.declencheurs.tags' "$T")
+            # Le motif de la table décide, et lui seul. Sans cette vérification,
+            # n'importe quel tag valait prod : les appelants filtrent bien sur
+            # « v* » dans leur « on: », mais un workflow_dispatch lancé depuis
+            # une ref de tag ne passe par aucun filtre, et un appelant à venir
+            # peut fort bien n'en poser aucun. Un tag d'essai aurait alors
+            # déployé ce que jouent les joueurs.
+            MOTIF=$(yq -r '.declencheurs.tags.motif' "$T")
+            case "$GITHUB_REF_NAME" in
+              $MOTIF) ;;
+              *) echo "::error::le tag $GITHUB_REF_NAME ne correspond pas au motif $MOTIF de la table : aucun environnement ne lui est associé"; exit 1 ;;
+            esac
+            ENV=$(yq -r '.declencheurs.tags.environnement' "$T")
             RAISON="tag $GITHUB_REF_NAME"
           else
             ENV=$(REF="$GITHUB_REF_NAME" yq -r \

@@ -42,7 +42,13 @@ schema: 1
 declencheurs:
   branches:
     main: dev
-  tags: prod
+  # Un tag ne déploie que s'il correspond au motif — motif de shell, lu tel
+  # quel par resoudre-env.yml. Un tag qui n'y correspond pas n'a pas
+  # d'environnement : le workflow s'arrête et le dit, il ne retombe pas sur le
+  # défaut. La production ne se déduit pas d'un doute.
+  tags:
+    motif: v*
+    environnement: prod
   # Environnement retenu quand rien ne correspond — une branche de travail, une
   # pull request. Le plus inoffensif des trois.
   defaut: dev

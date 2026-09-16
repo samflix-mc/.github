@@ -36,6 +36,10 @@ La table vit ici parce que ce dépôt est **public** : `mc-content` et
 | `workflow_dispatch` | au choix, souvent preprod |
 | tag `v*` | prod |
 
+Le motif des tags est dans la table, et un tag qui n'y correspond pas échoue :
+`resoudre-env.yml` s'arrête et le dit, plutôt que de déployer la production sur
+un tag technique ou de retomber silencieusement sur `dev`.
+
 La production n'est jamais atteinte par un push — c'est la barrière
 d'approbation du pauvre, les règles de protection d'environnement étant
 réservées au plan Enterprise. La préproduction n'est jamais atteinte par une
